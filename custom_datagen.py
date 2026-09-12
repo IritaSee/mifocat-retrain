@@ -85,7 +85,12 @@ def load_img(img_dir: str, img_list: List[str], target_size: Tuple[int, int] = (
     
     if is_mask:
         # Convert masks to one-hot encoding
-        # Assuming mask values are 0, 1, 2, 3 for 4 classes
+        # PNG exports commonly encode four classes as 0, 85, 170, 255,
+        # while NumPy masks may already contain class IDs 0, 1, 2, 3.
+        if stacked.max() > num_classes - 1:
+            stacked = np.rint(
+                stacked.astype('float32') * (num_classes - 1) / 255.0
+            ).astype('int32')
         # Shape: (N, H, W) -> (N, H, W, num_classes)
         one_hot = np.zeros((stacked.shape[0], stacked.shape[1], stacked.shape[2], num_classes), dtype='float32')
         for c in range(num_classes):
