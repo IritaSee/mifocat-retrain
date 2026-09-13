@@ -216,8 +216,7 @@ class KFoldTrainer:
         gradient_history_path = fold_dir / f"fold_{fold_id}_gradient_history.json"
         try:
             train_patients = self.data_loader.get_fold_patients(fold_id, 'train')
-            mon_img_files, _ = self.data_loader.get_file_list(train_patients, 'images')
-            mon_mask_files, _ = self.data_loader.get_file_list(train_patients, 'groundtruth')
+            mon_img_files, mon_mask_files = self.data_loader.get_paired_file_list(train_patients, 'images', 'groundtruth')
             mon_n = min(batch_size, len(mon_img_files))
             mon_X = load_img("", mon_img_files[:mon_n], target_size=(256, 256), is_mask=False)
             mon_Y = load_img("", mon_mask_files[:mon_n], target_size=(256, 256), is_mask=True, num_classes=4)

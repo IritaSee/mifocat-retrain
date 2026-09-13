@@ -257,7 +257,74 @@ class FoldAwareDataLoader:
             return file_list, str(self.base_dir)
         else:
             raise ValueError(f"✗ CRITICAL: No valid patient IDs found! Checked {len(patient_ids)} patient IDs in {self.base_dir}")
-    
+
+    def get_paired_file_list(self, patient_ids: List[str],
+                            image_subdir: str = 'images',
+                            mask_subdir: str = 'groundtruth') -> Tuple[List[str], List[str]]:
+        """
+        Get image/mask file paths matched by filename, not by directory glob
+        order. In this dataset each patient's `images/` and `groundtruth/`
+        folders commonly hold different slice counts (e.g. `Pasien1_5_ed.png`
+        with no `Pasien1_5_ed_gt.png`, or vice versa) — pairing by index
+        position (as get_file_list()'s two independent calls implicitly do
+        when zipped downstream) silently mismatches images with the wrong
+        mask, or desyncs batch sizes entirely once one list runs out first,
+        which surfaces as a "Invalid input shapes" Keras crash mid-epoch.
+        Matching by stem, and only keeping slices present in both folders,
+        is the only way to keep X/Y aligned.
+
+        Returns:
+            Tuple of (img_files, mask_files): same length, same order, each
+            index is a genuine (image, mask) pair.
+        """
+        def stem_key(filename: str) -> str:
+            name = Path(filename).stem
+            if name.lower().endswith('_gt'):
+                name = name[:-3]
+            return name
+
+        img_files: List[str] = []
+        mask_files: List[str] = []
+        matched_patients = 0
+        dropped_img_only = 0
+        dropped_mask_only = 0
+
+        for pid in patient_ids:
+            img_dir = self.base_dir / f"Pasien {pid}" / image_subdir
+            mask_dir = self.base_dir / f"Pasien {pid}" / mask_subdir
+            if not img_dir.exists() or not mask_dir.exists():
+                continue
+
+            img_map = {}
+            for ext in ('*.npy', '*.png', '*.jpg', '*.jpeg'):
+                for f in img_dir.glob(ext):
+                    img_map[stem_key(f.name)] = f
+            mask_map = {}
+            for ext in ('*.npy', '*.png', '*.jpg', '*.jpeg'):
+                for f in mask_dir.glob(ext):
+                    mask_map[stem_key(f.name)] = f
+
+            common = sorted(set(img_map) & set(mask_map))
+            if not common:
+                continue
+
+            matched_patients += 1
+            dropped_img_only += len(img_map.keys() - mask_map.keys())
+            dropped_mask_only += len(mask_map.keys() - img_map.keys())
+            for key in common:
+                img_files.append(str(img_map[key]))
+                mask_files.append(str(mask_map[key]))
+
+        if not img_files:
+            raise ValueError(
+                f"✗ CRITICAL: No matching image/mask pairs found! Checked {len(patient_ids)} patient IDs in {self.base_dir}"
+            )
+
+        print(f"[FoldAwareDataLoader.get_paired_file_list] ✓ {matched_patients} patients, "
+              f"{len(img_files)} matched image/mask pairs "
+              f"(dropped {dropped_img_only} images with no mask, {dropped_mask_only} masks with no image)")
+        return img_files, mask_files
+
     def get_generators(self, fold_id: int, batch_size: int = 8,
                       image_subdir: str = 'images',
                       mask_subdir: str = 'groundtruth',
@@ -289,14 +356,11 @@ class FoldAwareDataLoader:
         print(f"[FoldAwareDataLoader] Train patients: {train_patients[:5]}{'...' if len(train_patients) > 5 else ''}")
         print(f"[FoldAwareDataLoader] Val patients: {val_patients[:5]}{'...' if len(val_patients) > 5 else ''}")
         
-        # Get file lists (now returns FULL PATHS)
-        train_img_files, _ = self.get_file_list(train_patients, image_subdir)
-        val_img_files, _ = self.get_file_list(val_patients, image_subdir)
-        
-        # Get mask files (also full paths)
-        train_mask_files, _ = self.get_file_list(train_patients, mask_subdir)
-        val_mask_files, _ = self.get_file_list(val_patients, mask_subdir)
-        
+        # Get matched (image, mask) pairs — same length and order by construction,
+        # unlike two independent get_file_list() calls zipped by index.
+        train_img_files, train_mask_files = self.get_paired_file_list(train_patients, image_subdir, mask_subdir)
+        val_img_files, val_mask_files = self.get_paired_file_list(val_patients, image_subdir, mask_subdir)
+
         print(f"[FoldAwareDataLoader] Train: {len(train_img_files)} images, {len(train_mask_files)} masks")
         print(f"[FoldAwareDataLoader] Val: {len(val_img_files)} images, {len(val_mask_files)} masks")
         
