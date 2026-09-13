@@ -20,6 +20,14 @@ import cv2
 
 from math import ceil
 
+try:
+    import tensorflow as tf
+    from tensorflow import keras
+    from proposed_model import mifocat_components
+except ImportError:
+    tf = None
+    keras = None
+
 
 def load_img(img_dir: str, img_list: List[str], target_size: Tuple[int, int] = (256, 256),
              is_mask: bool = False, num_classes: int = 4) -> np.ndarray:
@@ -311,5 +319,46 @@ class FoldAwareDataLoader:
         # Use ceil so we do not silently drop the final partial batch; integer division was collapsing to 1 step
         train_steps = max(1, ceil(len(train_img_files) / float(batch_size)))
         val_steps = max(1, ceil(len(val_img_files) / float(batch_size)))
-        
+
         return train_gen, val_gen, train_steps, val_steps
+
+
+class MIFOCATGradientMonitor(keras.callbacks.Callback if keras is not None else object):
+    """
+    Records the global L2 gradient norm of each MIFOCAT loss component
+    (MSE, focal, categorical cross-entropy) on one fixed training batch,
+    once per epoch. The batch is fixed at construction time and is
+    independent of the generator driving the actual optimizer step, so the
+    measurement isolates "how much gradient signal does each component
+    produce" from epoch to epoch, on the same inputs.
+    """
+
+    def __init__(self, fixed_x: np.ndarray, fixed_y: np.ndarray, output_path,
+                 alpha: float = 0.25, gamma: float = 2.0):
+        super().__init__()
+        self.fixed_x = tf.constant(fixed_x)
+        self.fixed_y = tf.constant(fixed_y)
+        self.alpha = alpha
+        self.gamma = gamma
+        self.output_path = Path(output_path)
+        self.history = []
+
+    def on_epoch_end(self, epoch, logs=None):
+        with tf.GradientTape(persistent=True) as tape:
+            y_pred = self.model(self.fixed_x, training=True)
+            components = mifocat_components(self.fixed_y, y_pred, alpha=self.alpha, gamma=self.gamma)
+
+        record = {'epoch': epoch + 1}
+        for name, component_loss in components.items():
+            grads = [g for g in tape.gradient(component_loss, self.model.trainable_variables) if g is not None]
+            record[name] = float(tf.linalg.global_norm(grads).numpy()) if grads else 0.0
+        del tape
+
+        self.history.append(record)
+        print(f"[MIFOCATGradientMonitor] Epoch {epoch + 1}: "
+              f"mse={record['mse']:.6f} focal={record['focal']:.6f} cat={record['cat']:.6f}")
+
+    def on_train_end(self, logs=None):
+        with open(self.output_path, 'w') as f:
+            json.dump(self.history, f, indent=2)
+        print(f"[MIFOCATGradientMonitor] Saved gradient history: {self.output_path}")
