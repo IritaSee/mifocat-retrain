@@ -33,7 +33,7 @@ except ImportError:
     print("Warning: TensorFlow not installed. Metrics aggregation will still work.")
     tf = None
 
-from custom_datagen import FoldAwareDataLoader
+from custom_datagen import FoldAwareDataLoader, MIFOCATGradientMonitor, load_img
 from proposed_model import build_unet_mifocat, mifocat_loss, mean_iou, dice_score
 from transunet_model import build_transunet_mifocat, get_custom_objects
 import test_evaluation
@@ -209,7 +209,21 @@ class KFoldTrainer:
                 verbose=1
             )
         ]
-        
+
+        # Component-wise gradient monitor: fixed batch drawn independently from
+        # this fold's train split, so it isn't affected by the main generator's
+        # iteration state.
+        gradient_history_path = fold_dir / f"fold_{fold_id}_gradient_history.json"
+        try:
+            train_patients = self.data_loader.get_fold_patients(fold_id, 'train')
+            mon_img_files, mon_mask_files = self.data_loader.get_paired_file_list(train_patients, 'images', 'groundtruth')
+            mon_n = min(batch_size, len(mon_img_files))
+            mon_X = load_img("", mon_img_files[:mon_n], target_size=(256, 256), is_mask=False)
+            mon_Y = load_img("", mon_mask_files[:mon_n], target_size=(256, 256), is_mask=True, num_classes=4)
+            callbacks.append(MIFOCATGradientMonitor(mon_X, mon_Y, gradient_history_path))
+        except Exception as e:
+            print(f"[FOLD {fold_id}] ✗ Could not set up gradient monitor: {e}")
+
         # Train
         print(f"[FOLD {fold_id}] Training steps per epoch: {train_steps}, "
               f"Validation steps: {val_steps}")
@@ -242,7 +256,8 @@ class KFoldTrainer:
                 'final_val_loss': float(history.history['val_loss'][-1]),
                 'best_val_loss': float(np.min(history.history['val_loss'])),
                 'epochs_trained': len(history.history['loss']),
-                'checkpoint': str(checkpoint_path)
+                'checkpoint': str(checkpoint_path),
+                'gradient_history': str(gradient_history_path)
             }
             
             print(f"[FOLD {fold_id}] ✓ Training complete")
